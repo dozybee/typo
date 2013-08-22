@@ -1,6 +1,7 @@
 require 'base64'
 
 module Admin; end
+
 class Admin::ContentController < Admin::BaseController
   layout "administration", :except => [:show, :autosave]
 
@@ -25,6 +26,66 @@ class Admin::ContentController < Admin::BaseController
 
   def new
     new_or_edit
+  end
+
+  def merge
+    other_article_id = params[:merge_with]
+    @article = Article.find(params[:id])
+    @article = Article.get_or_build_article(params[:id])
+    unless @article.access_by? current_user
+      redirect_to :action => 'index'
+      flash[:error] = _("Error, you are not allowed to perform this action")
+      return
+    end
+    if other_article_id == params[:id]
+      redirect_to :action => 'edit', :id => params[:id] 
+      flash[:error] = _("Error, you are not allowed to perform Merge Articles using the same articles")
+      return
+    end
+    @article.merge_with(other_article_id)
+    @article.text_filter = current_user.text_filter if current_user.simple_editor?
+    @post_types = PostType.find(:all)
+#    if request.post?
+#      if params[:article][:draft]
+#        get_fresh_or_existing_draft_for_article
+#      else
+#        if not @article.parent_id.nil?
+#          @article = Article.find(@article.parent_id)
+#        end
+#      end
+#    end
+
+    @article.keywords = Tag.collection_to_string @article.tags
+#    @article.attributes = params[:article]
+    # TODO: Consider refactoring, because double rescue looks... weird.
+        
+    @article.published_at = DateTime.strptime(params[:article][:published_at], "%B %e, %Y %I:%M %p GMT%z").utc rescue Time.parse(params[:article][:published_at]).utc rescue nil
+
+    if request.post?
+      set_article_author
+      save_attachments
+      
+      @article.state = "draft" if @article.draft
+      if @article.save
+
+        destroy_the_draft unless @article.draft
+        set_article_categories
+
+        # remove the merged article by reloading to prevent the inadvertent destroy of
+        # all of the comments, because these associations are cached. The article model
+        # has the :dependent => :destroy        
+        merged_article = Article.find(other_article_id)
+        merged_article.reload
+        merged_article.destroy 
+
+        flash[:notice] = _('Article was successfully merged')
+        redirect_to :action => 'edit', :id => params[:id]
+        return
+      end
+    end 
+
+    flash[:notice] = _('Article was not merged')
+    redirect_to :action => 'edit', :id => params[:id]
   end
 
   def edit
@@ -99,7 +160,6 @@ class Admin::ContentController < Admin::BaseController
     save_attachments
 
     set_article_title_for_autosave
-
     @article.state = "draft" unless @article.state == "withdrawn"
     if @article.save
       render(:update) do |page|
